@@ -7,7 +7,7 @@ leverage [gRPC][1] for inter-service communication. The example application plot
 
 The web page makes an HTTP request to the API Endpoint which in turn spawns a number of RPC requests to the backend services.
  
-![new_sequence](https://cloud.githubusercontent.com/assets/739782/7439604/d1f324c2-f036-11e4-958a-6f6913049946.png)
+![reqseq](https://user-images.githubusercontent.com/739782/29102656-8328b66e-7c6f-11e7-8fe5-c9d5f90e213f.png)
 
 _Note:_ Data for each of the services is stored in JSON flat files under the `/data/` directory. In reality each of the services could choose their own specialty datastore. The Geo service for example could use PostGis or any other database specializing in geospacial queries.
 
@@ -28,10 +28,6 @@ Clone the repository:
     $ git clone git@github.com:harlow/go-micro-services.git
 
 ### Run
-
-Make a copy of the example env file (required until [docker-compose allows optional env][2]):
-
-	$ touch .env
 
 To make the demo as straigforward as possible; [Docker Compose](https://docs.docker.com/compose/) is used to run all the services at once (In a production environment each of the services would be run (and scaled) independently).
 
@@ -74,19 +70,6 @@ The JSON response:
 		}
 	}]
 }
-```
-
-### Tracing
-
-Tracing data is pushed to Google Stackdriver. See [Tracing gRPC calls in Golang with Google Stackdriver](https://medium.com/@harlow/tracing-grpc-calls-in-golang-with-google-stackdriver-b22495763a06#.6skzmkwqy) for more detailed information on how tracing was implemented.
-
-<img width="1140" alt="screen shot 2017-02-27 at 8 53 17 pm" src="https://cloud.githubusercontent.com/assets/739782/23392216/fa24096e-fd2e-11e6-9dfc-f2380f9f8b1c.png">
-
-To enable tracing add the following to `.env`:
-
-```
-TRACE_PROJECT_ID=
-TRACE_JSON_CONFIG=
 ```
 
 ### Protobufs

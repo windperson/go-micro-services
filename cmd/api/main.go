@@ -2,16 +2,118 @@ package main
 
 import (
 	"encoding/json"
+	"flag"
 	"log"
 	"net/http"
 
-	"sync"
-
-	"cloud.google.com/go/trace"
-	"github.com/harlow/go-micro-services/pb/geo"
 	"github.com/harlow/go-micro-services/pb/profile"
-	"github.com/harlow/go-micro-services/pb/rate"
+	"github.com/harlow/go-micro-services/pb/search"
+	"google.golang.org/grpc"
 )
+
+func main() {
+	var (
+		port        = flag.String("port", "8080", "The server port")
+		searchAddr  = flag.String("searchaddr", "search:8080", "Search service addr")
+		profileAddr = flag.String("profileaddr", "profile:8080", "Profile service addr")
+	)
+	flag.Parse()
+
+	srv := &server{
+		searchClient:  search.NewSearchClient(mustDial(*searchAddr)),
+		profileClient: profile.NewProfileClient(mustDial(*profileAddr)),
+	}
+
+	http.HandleFunc("/", srv.searchHandler)
+	log.Fatal(http.ListenAndServe(":"+*port, nil))
+}
+
+// mustDial ensures a tcp connection to specified address.
+func mustDial(addr string) *grpc.ClientConn {
+	conn, err := grpc.Dial(
+		addr,
+		grpc.WithInsecure(),
+	)
+	if err != nil {
+		log.Fatalf("failed to dial: %v", err)
+		panic(err)
+	}
+	return conn
+}
+
+// server holds open the grpc connections and serves the JSON http endpoint
+type server struct {
+	searchClient  search.SearchClient
+	profileClient profile.ProfileClient
+}
+
+func (s *server) searchHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	ctx := r.Context()
+
+	// in/out dates from query params
+	inDate, outDate := r.URL.Query().Get("inDate"), r.URL.Query().Get("outDate")
+	if inDate == "" || outDate == "" {
+		http.Error(w, "Please specify inDate/outDate params", http.StatusBadRequest)
+		return
+	}
+
+	// nearby hotel ids
+	// TODO(hw): allow lat/lon from input params
+	nearby, err := s.searchClient.Nearby(ctx, &search.NearbyRequest{
+		Lat:     37.7749,
+		Lon:     -122.4194,
+		InDate:  inDate,
+		OutDate: outDate,
+	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// hotel profiles
+	// TODO(hw): allow custom locale from input params
+	profile, err := s.profileClient.GetProfiles(ctx, &profile.Request{
+		HotelIds: nearby.HotelIds,
+		Locale:   "en",
+	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// geo json response body
+	body := geoJSON(profile.Hotels)
+	json.NewEncoder(w).Encode(body)
+}
+
+// build a geoJSON response that allows google map to plot points directly on map
+// https://developers.google.com/maps/documentation/javascript/datalayer#sample_geojson
+func geoJSON(hotels []*profile.Hotel) response {
+	r := response{Type: "FeatureCollection"}
+
+	for _, hotel := range hotels {
+		f := feature{
+			Type: "Feature",
+			ID:   hotel.Id,
+			Properties: properties{
+				Name:        hotel.Name,
+				PhoneNumber: hotel.PhoneNumber,
+			},
+			Geometry: geometry{
+				Type: "Point",
+				Coordinates: []float32{
+					hotel.Address.Lon,
+					hotel.Address.Lat,
+				},
+			},
+		}
+
+		r.Features = append(r.Features, f)
+	}
+
+	return r
+}
 
 type response struct {
 	Type     string    `json:"type"`
@@ -19,105 +121,18 @@ type response struct {
 }
 
 type feature struct {
-	ID         string `json:"id"`
-	Type       string `json:"type"`
-	Properties struct {
-		Name        string `json:"name"`
-		PhoneNumber string `json:"phone_number"`
-	} `json:"properties"`
-	Geometry struct {
-		Type        string    `json:"type"`
-		Coordinates []float32 `json:"coordinates"`
-	} `json:"geometry"`
+	ID         string     `json:"id"`
+	Type       string     `json:"type"`
+	Properties properties `json:"properties"`
+	Geometry   geometry   `json:"geometry"`
 }
 
-func main() {
-	e := newEnv()
-	http.Handle("/", requestHandler(e))
-	log.Fatal(http.ListenAndServe(e.serviceAddr(), nil))
+type properties struct {
+	Name        string `json:"name"`
+	PhoneNumber string `json:"phone_number"`
 }
 
-func requestHandler(e *env) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-
-		span := e.Tracer.SpanFromRequest(r)
-		defer span.Finish()
-		ctx := trace.NewContext(r.Context(), span)
-
-		// in/out dates from query params
-		inDate, outDate := r.URL.Query().Get("inDate"), r.URL.Query().Get("outDate")
-		if inDate == "" || outDate == "" {
-			http.Error(w, "Please specify inDate/outDate params", http.StatusBadRequest)
-			return
-		}
-
-		// finds nearby hotels
-		// TODO(hw): use lat/lon from request params
-		nearby, err := e.GeoClient.Nearby(ctx, &geo.Request{
-			Lat: 37.7749,
-			Lon: -122.4194,
-		})
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-
-		var profileRes *profile.Result
-		var rateRes *rate.Result
-
-		wg := &sync.WaitGroup{}
-		wg.Add(2)
-
-		go func() {
-			defer wg.Done()
-			profileRes, err = e.ProfileClient.GetProfiles(ctx, &profile.Request{
-				HotelIds: nearby.HotelIds,
-				Locale:   "en",
-			})
-		}()
-
-		go func() {
-			defer wg.Done()
-			rateRes, err = e.RateClient.GetRates(ctx, &rate.Request{
-				HotelIds: nearby.HotelIds,
-				InDate:   inDate,
-				OutDate:  outDate,
-			})
-		}()
-
-		wg.Wait()
-
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-
-		json.NewEncoder(w).Encode(
-			geoJSONResponse(profileRes.Hotels),
-		)
-	})
-}
-
-func geoJSONResponse(hotels []*profile.Hotel) response {
-	r := response{
-		Type: "FeatureCollection",
-	}
-
-	for _, hotel := range hotels {
-		f := feature{
-			Type: "Feature",
-			ID:   hotel.Id,
-		}
-		f.Properties.Name = hotel.Name
-		f.Properties.PhoneNumber = hotel.PhoneNumber
-		f.Geometry.Type = "Point"
-		f.Geometry.Coordinates = []float32{
-			hotel.Address.Lon,
-			hotel.Address.Lat,
-		}
-		r.Features = append(r.Features, f)
-	}
-
-	return r
+type geometry struct {
+	Type        string    `json:"type"`
+	Coordinates []float32 `json:"coordinates"`
 }
